@@ -1,52 +1,60 @@
 import streamlit as st
 import uuid
-
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
-
-
-if 'message_history' not in st.session_state:
-    st.session_state['message_history'] = []
-
-
-
-#load conversation history
-for message in st.session_state['message_history']:
-    with st.chat_message(message['role']):
-        st.text(message['content'])
-
-user_input = st.chat_input('type here..')
-
+import time
 from langchain_core.messages import HumanMessage
 from langgraph_backend import chatbot
 
-if user_input:
-    # 1. Show & store user message
-    st.session_state['message_history'].append({
-        'role': 'user',
-        'content': user_input
-    })
-    with st.chat_message('user'):
-        st.text(user_input)
 
-    # 2. Convert history → LangGraph format
+# ---------- Session setup ----------
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
+
+if "message_history" not in st.session_state:
+    st.session_state.message_history = []
+
+
+# ---------- Load previous messages ----------
+for message in st.session_state.message_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+
+# ---------- User input ----------
+user_input = st.chat_input("Type here...")
+
+if user_input:
+    # 1️⃣ Store & display user message
+    st.session_state.message_history.append({
+        "role": "user",
+        "content": user_input
+    })
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # 2️⃣ Convert history → LangGraph messages
     messages = [
         HumanMessage(content=m["content"])
-        for m in st.session_state['message_history']
+        for m in st.session_state.message_history
         if m["role"] == "user"
     ]
 
-    # 3. Call LangGraph
-    result = chatbot.invoke(
-    {"messages": messages},
-    config={"configurable": {"thread_id": st.session_state.thread_id}})
+    # 3️⃣ Stream assistant reply with typewriter effect
+    response_container = st.empty()
+    full_reply = ""
 
-    assistant_reply = result["messages"][-1].content
+    for chunk, metadata in chatbot.stream(
+        {"messages": messages},
+        config={"configurable": {"thread_id": st.session_state.thread_id}},
+        stream_mode="messages",
+    ):
+        if chunk.content:
+            for char in chunk.content:
+                full_reply += char
+                response_container.chat_message("assistant").markdown(full_reply)
+                time.sleep(0.001)
 
-    # 4. Store & show assistant reply
-    st.session_state['message_history'].append({
-        'role': 'assistant',
-        'content': assistant_reply
+    # 4️⃣ Save assistant reply
+    st.session_state.message_history.append({
+        "role": "assistant",
+        "content": full_reply
     })
-    with st.chat_message('assistant'):
-        st.text(assistant_reply)
