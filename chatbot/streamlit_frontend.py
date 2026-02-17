@@ -2,7 +2,8 @@ import streamlit as st
 import uuid
 import time
 from langchain_core.messages import HumanMessage, AIMessage
-from langgraph_backend import chatbot
+from langgraph_database_backend import chatbot, retrieve_all_threads
+import sqlite3
 
 
 # ---------- Utility functions ----------
@@ -55,9 +56,13 @@ if "message_history" not in st.session_state:
     st.session_state.message_history = []
 
 if "chat_threads" not in st.session_state:
-    st.session_state.chat_threads = []
+    st.session_state.chat_threads = retrieve_all_threads()
 
-add_thread(st.session_state.thread_id)
+# ensure current thread exists only once
+existing_ids = {t["id"] for t in st.session_state.chat_threads}
+
+if st.session_state.thread_id not in existing_ids:
+    add_thread(st.session_state.thread_id)
 
 
 # ---------- Sidebar UI ----------
