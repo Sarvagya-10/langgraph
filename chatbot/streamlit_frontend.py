@@ -1,9 +1,7 @@
 import streamlit as st
 import uuid
-import time
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph_database_backend import chatbot, retrieve_all_threads
-import sqlite3
 
 
 # ---------- Utility functions ----------
@@ -15,8 +13,8 @@ def add_thread(thread_id):
     if thread_id not in [t["id"] for t in st.session_state.chat_threads]:
         st.session_state.chat_threads.append({
             "id": thread_id,
-            "name": thread_id[:8],  # temporary name
-            "auto_named": False     # track if first message used
+            "name": thread_id[:8],
+            "auto_named": False
         })
 
 
@@ -38,7 +36,7 @@ def delete_thread(thread_id):
 def auto_rename_thread(thread_id, first_message):
     for t in st.session_state.chat_threads:
         if t["id"] == thread_id and not t["auto_named"]:
-            t["name"] = first_message[:40]  # truncate title
+            t["name"] = first_message[:40]
             t["auto_named"] = True
             break
 
@@ -58,14 +56,12 @@ if "message_history" not in st.session_state:
 if "chat_threads" not in st.session_state:
     st.session_state.chat_threads = retrieve_all_threads()
 
-# ensure current thread exists only once
 existing_ids = {t["id"] for t in st.session_state.chat_threads}
-
 if st.session_state.thread_id not in existing_ids:
     add_thread(st.session_state.thread_id)
 
 
-# ---------- Sidebar UI ----------
+# ---------- Sidebar ----------
 st.sidebar.title("LangGraph Chatbot")
 
 if st.sidebar.button("New Chat"):
@@ -76,39 +72,44 @@ st.sidebar.header("My Conversations")
 
 for thread in st.session_state.chat_threads[::-1]:
     thread_id = thread["id"]
-
     col1, col2 = st.sidebar.columns([6, 1])
 
-    # ---------- Open thread ----------
     if col1.button(thread["name"], key=f"open_{thread_id}"):
         st.session_state.thread_id = thread_id
         messages = load_conversation(thread_id)
 
         temp_messages = []
         for msg in messages:
-            role = "user" if isinstance(msg, HumanMessage) else "assistant"
-            temp_messages.append({"role": role, "content": msg.content})
+            if isinstance(msg, HumanMessage):
+                role = "user"
+            else:
+                role = "assistant"
+
+            temp_messages.append({
+                "role": role,
+                "content": msg.content
+            })
 
         st.session_state.message_history = temp_messages
         st.rerun()
 
-    # ---------- Delete ----------
     if col2.button("🗑", key=f"del_{thread_id}"):
         delete_thread(thread_id)
         st.rerun()
 
 
-# ---------- Load previous messages ----------
+# ---------- Display Previous Messages ----------
 for message in st.session_state.message_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 
-# ---------- User input ----------
+# ---------- User Input ----------
 user_input = st.chat_input("Type here...")
 
 if user_input:
-    # store user message
+
+    # Save user message
     st.session_state.message_history.append({
         "role": "user",
         "content": user_input
@@ -117,28 +118,54 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # 🔥 AUTO-RENAME on first message only
     auto_rename_thread(st.session_state.thread_id, user_input)
 
-    # send ONLY new message to LangGraph
-    messages = [HumanMessage(content=user_input)]
-
-    response_container = st.empty()
     full_reply = ""
 
-    for chunk, metadata in chatbot.stream(
-        {"messages": messages},
-        config={"configurable": {"thread_id": st.session_state.thread_id}},
-        stream_mode="messages",
-    ):
-        if isinstance(chunk, AIMessage) and chunk.content:
-            for char in chunk.content:
-                full_reply += char
-                response_container.chat_message("assistant").markdown(full_reply)
-                time.sleep(0.001)
+    # Assistant container
+    with st.chat_message("assistant"):
+        status_container = st.empty()
+        response_container = st.empty()
 
-    # save assistant reply
+        # Stream from LangGraph
+        ##############################################
+        for update in chatbot.stream(
+            {"messages": [HumanMessage(content=user_input)]},
+            config={"configurable": {"thread_id": st.session_state.thread_id}},
+            stream_mode="updates",
+        ):
+
+            for node, value in update.items():
+
+                if node == "chat_node":
+                    message = value["messages"][-1]
+
+                    # Tool call
+                    if isinstance(message, AIMessage) and message.tool_calls:
+                        for tool_call in message.tool_calls:
+                            tool_name = tool_call["name"]
+
+                            if tool_name == "calculator":
+                                status_container.info("🧮 Calculating...")
+                            elif tool_name == "get_stock_price":
+                                status_container.info("📈 Fetching stock price...")
+                            elif tool_name == "duckduckgo_search":
+                                status_container.info("🔍 Searching...")
+                            else:
+                                status_container.info(f"⚙️ Running {tool_name}...")
+
+                    # Assistant streaming text
+                    elif isinstance(message, AIMessage) and message.content:
+                        full_reply += message.content
+                        response_container.markdown(full_reply)
+
+                elif node == "tools":
+                    status_container.empty()
+    # Save assistant reply once
     st.session_state.message_history.append({
         "role": "assistant",
         "content": full_reply
     })
+
+
+print("successfully ran frontend")
