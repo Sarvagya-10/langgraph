@@ -1,7 +1,11 @@
 import streamlit as st
 import uuid
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from langgraph_database_backend import chatbot, retrieve_all_threads
+from langgraph_database_backend import (
+    chatbot,
+    retrieve_all_threads,
+    ingest_pdf
+)
 
 
 # ---------- Utility functions ----------
@@ -55,6 +59,9 @@ if "message_history" not in st.session_state:
 
 if "chat_threads" not in st.session_state:
     st.session_state.chat_threads = retrieve_all_threads()
+    
+if "ingested_docs" not in st.session_state:
+    st.session_state.ingested_docs = {}
 
 existing_ids = {t["id"] for t in st.session_state.chat_threads}
 if st.session_state.thread_id not in existing_ids:
@@ -67,6 +74,29 @@ st.sidebar.title("LangGraph Chatbot")
 if st.sidebar.button("New Chat"):
     reset_chat()
     st.rerun()
+
+thread_key = str(st.session_state.thread_id)
+thread_docs = st.session_state.ingested_docs.setdefault(thread_key, {})
+
+st.sidebar.subheader("Upload PDF")
+
+uploaded_pdf = st.sidebar.file_uploader(
+    "Upload a PDF for this chat",
+    type=["pdf"]
+)
+
+if uploaded_pdf:
+    if uploaded_pdf.name in thread_docs:
+        st.sidebar.info(f"{uploaded_pdf.name} already indexed.")
+    else:
+        with st.sidebar.status("Indexing PDF...", expanded=True) as status:
+            summary = ingest_pdf(
+                uploaded_pdf.getvalue(),
+                thread_id=thread_key,
+                filename=uploaded_pdf.name
+            )
+            thread_docs[uploaded_pdf.name] = summary
+            status.update(label="PDF indexed", state="complete", expanded=False)
 
 st.sidebar.header("My Conversations")
 
@@ -123,44 +153,75 @@ if user_input:
     full_reply = ""
 
     # Assistant container
+    # with st.chat_message("assistant"):
+    #     status_container = st.empty()
+    #     response_container = st.empty()
+
+    #     # Stream from LangGraph
+    #     ##############################################
+    #     for update in chatbot.stream(
+    #         {"messages": [HumanMessage(content=user_input)]},
+    #         config={"configurable": {"thread_id": st.session_state.thread_id}},
+    #         stream_mode="messages"
+    #     ):
+
+    #         for node, value in update.items():
+
+    #             if node == "chat_node":
+    #                 message = value["messages"][-1]
+
+    #                 # Tool call
+    #                 if isinstance(message, AIMessage) and message.tool_calls:
+    #                     for tool_call in message.tool_calls:
+    #                         tool_name = tool_call["name"]
+
+    #                         if tool_name == "calculator":
+    #                             status_container.info("🧮 Calculating...")
+    #                         elif tool_name == "get_stock_price":
+    #                             status_container.info("📈 Fetching stock price...")
+    #                         elif tool_name == "search":
+    #                             status_container.info("🔍 Searching...")
+    #                         else:
+    #                             status_container.info(f"⚙️ Running {tool_name}...")
+
+    #                 # Assistant streaming text
+    #                 elif isinstance(message, AIMessage) and message.content:
+    #                     full_reply += message.content
+    #                     response_container.markdown(full_reply)
+
+    #             elif node == "tools":
+    #                 status_container.empty()
     with st.chat_message("assistant"):
         status_container = st.empty()
-        response_container = st.empty()
+        def ai_stream():
+            for message_chunk, _ in chatbot.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                config={"configurable": {"thread_id": thread_key}},
+                stream_mode="messages"
+            ):
 
-        # Stream from LangGraph
-        ##############################################
-        for update in chatbot.stream(
-            {"messages": [HumanMessage(content=user_input)]},
-            config={"configurable": {"thread_id": st.session_state.thread_id}},
-            stream_mode="updates",
-        ):
+                # Tool message
+                if isinstance(message_chunk, ToolMessage):
+                    tool_name = getattr(message_chunk, "name", "tool")
 
-            for node, value in update.items():
+                    if tool_name == "calculator":
+                        status_container.info("🧮 Calculating...")
+                    elif tool_name == "get_stock_price":
+                        status_container.info("📈 Fetching stock price...")
+                    elif tool_name == "search":
+                        status_container.info("🔍 Searching...")
+                    elif tool_name == "rag_tool":
+                        status_container.info("📄 Reading document...")
+                    else:
+                        status_container.info(f"⚙️ Running {tool_name}...")
 
-                if node == "chat_node":
-                    message = value["messages"][-1]
+                # AI response streaming
+                if isinstance(message_chunk, AIMessage):
+                    yield message_chunk.content
 
-                    # Tool call
-                    if isinstance(message, AIMessage) and message.tool_calls:
-                        for tool_call in message.tool_calls:
-                            tool_name = tool_call["name"]
+            status_container.empty()
 
-                            if tool_name == "calculator":
-                                status_container.info("🧮 Calculating...")
-                            elif tool_name == "get_stock_price":
-                                status_container.info("📈 Fetching stock price...")
-                            elif tool_name == "duckduckgo_search":
-                                status_container.info("🔍 Searching...")
-                            else:
-                                status_container.info(f"⚙️ Running {tool_name}...")
-
-                    # Assistant streaming text
-                    elif isinstance(message, AIMessage) and message.content:
-                        full_reply += message.content
-                        response_container.markdown(full_reply)
-
-                elif node == "tools":
-                    status_container.empty()
+        full_reply = st.write_stream(ai_stream())
     # Save assistant reply once
     st.session_state.message_history.append({
         "role": "assistant",

@@ -14,6 +14,13 @@ import os
 import sqlite3
 import requests
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+
+import tempfile
+
 
 # =========================
 # 1. ENV + LLM SETUP
@@ -31,10 +38,23 @@ llm = ChatGroq(
     model="llama-3.1-8b-instant"
 )
 
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
+print(".env loaded")
 # =========================
 # 2. TOOLS
 # =========================
+
+_THREAD_RETRIEVERS = {}
+_THREAD_METADATA = {}
+
+def _get_retriever(thread_id):
+    if thread_id and str(thread_id) in _THREAD_RETRIEVERS:
+        return _THREAD_RETRIEVERS[str(thread_id)]
+    return None
+
 
 # 🔎 Web Search Tool
 duckduckgo = DuckDuckGoSearchRun(region="us-en")
@@ -45,6 +65,66 @@ def search(query: str) -> str:
     return duckduckgo.run(query)
 
 search.name = "search"
+
+
+def ingest_pdf(file_bytes: bytes, thread_id: str, filename: str = None):
+    if not file_bytes:
+        raise ValueError("No file uploaded")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
+        temp.write(file_bytes)
+        temp_path = temp.name
+
+    try:
+        loader = PyPDFLoader(temp_path)
+        docs = loader.load()
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+
+        chunks = splitter.split_documents(docs)
+
+        vector_store = FAISS.from_documents(chunks, embeddings)
+        retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+
+        _THREAD_RETRIEVERS[str(thread_id)] = retriever
+        _THREAD_METADATA[str(thread_id)] = {
+            "filename": filename,
+            "documents": len(docs),
+            "chunks": len(chunks)
+        }
+
+        return {
+            "filename": filename,
+            "documents": len(docs),
+            "chunks": len(chunks)
+        }
+
+    finally:
+        os.remove(temp_path)
+
+@tool
+def rag_tool(query: str, thread_id: str) -> dict:
+    """
+    Retrieve relevant information from uploaded PDF.
+    Always pass thread_id.
+    """
+    retriever = _get_retriever(thread_id)
+
+    if retriever is None:
+        return {"error": "No document uploaded for this thread."}
+
+    docs = retriever.invoke(query)
+
+    return {
+        "query": query,
+        "context": [doc.page_content for doc in docs],
+        "metadata": [doc.metadata for doc in docs],
+        "source_file": _THREAD_METADATA.get(str(thread_id), {}).get("filename")
+    }
+
 
 # 🧮 Calculator Tool
 @tool
@@ -103,11 +183,13 @@ def get_stock_price(symbol: str) -> dict:
         return {"error": "Invalid symbol or API limit reached", "raw": data}
 
 
-tools = [search, calculator, get_stock_price]
+tools = [search, calculator, get_stock_price, rag_tool]
 llm_with_tools = llm.bind_tools(
     tools,
     tool_choice="auto"
 )
+
+print("tools successfully integrated")
 
 # =========================
 # 3. STATE
@@ -123,14 +205,24 @@ class ChatState(TypedDict):
 
 from langchain_core.messages import SystemMessage
 
-def chat_node(state: ChatState):
-    messages = state["messages"]
+def chat_node(state: ChatState, config=None):
+    thread_id = None
+    if config:
+        thread_id = config.get("configurable", {}).get("thread_id")
 
     system = SystemMessage(
-        content="You may only use these tools: search, calculator, get_stock_price. Do not call any other tool."
+        content=(
+            "You may use these tools when helpful: search, calculator, "
+            "get_stock_price, rag_tool. "
+            f"For PDF questions, call rag_tool and include thread_id '{thread_id}'."
+        )
     )
 
-    response = llm_with_tools.invoke([system] + messages)
+    response = llm_with_tools.invoke(
+        [system] + state["messages"],
+        config=config
+    )
+
     return {"messages": [response]}
 tool_node = ToolNode(tools)
 
@@ -146,6 +238,7 @@ conn = sqlite3.connect(
 
 checkpointer = SqliteSaver(conn=conn)
 
+print("database checkpointer done")
 
 # =========================
 # 6. GRAPH
@@ -170,7 +263,7 @@ graph.add_conditional_edges(
 graph.add_edge("tools", "chat_node")
 
 chatbot = graph.compile(checkpointer=checkpointer)
-
+print("Graph compiled successfully")
 
 # =========================
 # 7. THREAD RETRIEVAL
@@ -192,6 +285,7 @@ def retrieve_all_threads():
             })
 
     return threads
+print("thread retrieval done")
 
 
 print("successfully ran backend")
