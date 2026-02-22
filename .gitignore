@@ -1,3 +1,4 @@
 agenticai
 .env
 .\chatbot\chatbot.db
+chatbot.db
